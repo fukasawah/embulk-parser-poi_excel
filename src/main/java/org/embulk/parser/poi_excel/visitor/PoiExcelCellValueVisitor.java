@@ -1,7 +1,11 @@
 package org.embulk.parser.poi_excel.visitor;
 
 import java.text.MessageFormat;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.CellValue;
@@ -68,6 +72,49 @@ public class PoiExcelCellValueVisitor {
 			throw new IllegalStateException(MessageFormat.format("unsupported POI cellType={0}", cellType));
 		}
 	}
+	private static class CellRangeAddgessMap {
+		private final Logger log = Exec.getLogger(getClass());
+		private final Map<String, Map<Integer, Map<Integer, CellRangeAddress>>> cache = new HashMap<>();
+
+		private Map<Integer, Map<Integer, CellRangeAddress>> getCache(Cell cell) {
+
+			Sheet sheet = cell.getSheet();
+			Map<Integer, Map<Integer, CellRangeAddress>> map = cache.get(sheet.getSheetName());
+			if (map != null) {
+				return map;
+			}
+			log.debug("Generate Cache... this={}, sheet={}, ThreadId={}", this, cell.getSheet().getSheetName(), Thread.currentThread().getId());
+			int size = sheet.getNumMergedRegions();
+			map = new TreeMap<>();
+			cache.put(sheet.getSheetName(), map);
+			for (int i = 0; i < size; i++) {
+				CellRangeAddress range = sheet.getMergedRegion(i);
+				for (int ri = range.getFirstRow(); ri <= range.getLastRow(); ++ri) {
+					Map<Integer, CellRangeAddress> rowMap = map.get(ri);
+					if (rowMap == null) {
+						rowMap = new TreeMap<>();
+						map.put(ri, rowMap);
+					}
+					for (int ci = range.getFirstColumn(); ci <= range.getLastColumn(); ++ci) {
+						CellRangeAddress cellRangeAddress = rowMap.get(ci);
+						if (cellRangeAddress == null) {
+							rowMap.put(ci, range);
+						}
+					}
+				}
+			}
+			return map;
+		}
+
+		public CellRangeAddress get(Cell cell) {
+			int r = cell.getRowIndex();
+			int c = cell.getColumnIndex();
+			return getCache(cell).getOrDefault(r, Collections.<Integer, CellRangeAddress>emptyMap()).getOrDefault(c,
+					null);
+		}
+	}
+
+	private final CellRangeAddgessMap cellRangeAddgessMap = new CellRangeAddgessMap();
 
 	protected void visitCellValueBlank(PoiExcelColumnBean bean, Cell cell, CellVisitor visitor) {
 		assert cell.getCellType() == Cell.CELL_TYPE_BLANK;
@@ -80,31 +127,26 @@ public class PoiExcelCellValueVisitor {
 			return;
 		}
 
-		int r = cell.getRowIndex();
-		int c = cell.getColumnIndex();
+		CellRangeAddress range = cellRangeAddgessMap.get(cell);
 
-		Sheet sheet = cell.getSheet();
-		int size = sheet.getNumMergedRegions();
-		for (int i = 0; i < size; i++) {
-			CellRangeAddress range = visitorValue.getSheet().getMergedRegion(i);
-			if (range.isInRange(r, c)) {
-				Row firstRow = sheet.getRow(range.getFirstRow());
-				if (firstRow == null) {
-					visitCellNull(column);
-					return;
-				}
-				Cell firstCell = firstRow.getCell(range.getFirstColumn());
-				if (firstCell == null) {
-					visitCellNull(column);
-					return;
-				}
-
-				visitCellValue(bean, firstCell, visitor);
+		if (range != null) {
+			Sheet sheet = cell.getSheet();
+			Row firstRow = sheet.getRow(range.getFirstRow());
+			if (firstRow == null) {
+				visitCellNull(column);
 				return;
 			}
+			Cell firstCell = firstRow.getCell(range.getFirstColumn());
+			if (firstCell == null) {
+				visitCellNull(column);
+				return;
+			}
+			visitCellValue(bean, firstCell, visitor);
+			return;
 		}
 
 		visitor.visitCellValueBlank(column, cell);
+		return;
 	}
 
 	protected void visitCellValueFormula(PoiExcelColumnBean bean, Cell cell, CellVisitor visitor) {
